@@ -20,7 +20,14 @@ This skill provides an end-to-end automated workflow for migrating logging workl
 
 Connecting to or modifying any other infrastructure is strictly prohibited. Every `gcloud compute ssh` command must include the exact `--project` and `--zone` flags matching the dynamically provided input.
 
-## Execution
+## Agent Execution
+To run this migration automatically using an AI Agent, simply open this repository in your agent's workspace and provide the following prompt:
+> **"Run the google-fluentd-migration-skill"**
+
+The agent will automatically read the `SKILL.md` file, understand the architecture and safety boundaries, and interactively guide you through the migration stages.
+
+## Manual Execution
+
 
 **1. Local Testing (Safe):**
 Use the test wrappers to validate the logic against local dummy configs safely without touching any VMs.
