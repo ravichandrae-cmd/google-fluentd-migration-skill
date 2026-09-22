@@ -1,0 +1,6 @@
+<source>
+  @type tail
+  format dummy
+  path /var/log/dummy.log
+  tag dummy
+</source>

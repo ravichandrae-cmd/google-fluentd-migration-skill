@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+import sys
+import os
+import re
+import json
+import time
+import subprocess
+import tempfile
+import uuid
+from datetime import datetime, timezone
+
+def run_cmd(cmd, check=True):
+    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if check and res.returncode != 0:
+        raise RuntimeError(f"Command failed ({res.returncode}): {cmd}\nOutput: {res.stdout}\nError: {res.stderr}")
+    return res
+
+def run_ssh_cmd(remote_vm, project, zone, command, check=True):
+    full_cmd = f"gcloud compute ssh {remote_vm} --project={project} --zone={zone} --command=\"{command}\""
+    return run_cmd(full_cmd, check=check)
+
+class Stage5MigrationEngine:
+    def __init__(self, config_dir, app_rel_path, remote_vm=None, project=None, zone=None, local_mode=False):
+        self.config_dir = os.path.abspath(config_dir)
+        self.app_rel_path = app_rel_path
+        self.remote_vm = remote_vm
+        self.project = project
+        self.zone = zone
+        self.local_mode = local_mode
+
+        self.app_conf_local = os.path.join(self.config_dir, self.app_rel_path)
+        self.master_conf_local = os.path.join(self.config_dir, "google-fluentd.conf")
+
+        # Discovered runtime properties
+        self.discovered = {
+            "daemon_user": "fluent",
+            "daemon_group": "fluent",
+            "oss_service_name": "fluentd",
+            "oss_config_dir": "/etc/fluent",
+            "oss_pos_dir": "/var/lib/fluentd/pos",
+            "oss_buffer_dir": "/var/log/fluentd/buffers",
+            "legacy_service_name": "google-fluentd",
+            "legacy_config_dir": "/etc/google-fluentd",
+            "legacy_pos_dir": "/var/lib/google-fluentd/pos",
+            "project_id": project or "unknown-project"
+        }
+
+        self.app_metadata = self._parse_app_config()
+
+    def _parse_app_config(self):
+        if not os.path.isfile(self.app_conf_local):
+            raise FileNotFoundError(f"Application configuration not found at {self.app_conf_local}")
+
+        with open(self.app_conf_local, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Extract source type, path, tag, pos_file
+        source_type = "tail"
+        if "<source>" in content:
+            m_type = re.search(r'@type\s+([^\s#]+)', content)
+            if m_type:
+                source_type = m_type.group(1).strip()
+
+        m_path = re.search(r'path\s+([^\s#]+)', content)
+        log_path = m_path.group(1).strip() if m_path else None
+
+        m_pos = re.search(r'pos_file\s+([^\s#]+)', content)
+        pos_file = m_pos.group(1).strip() if m_pos else None
+
+        m_tag = re.search(r'tag\s+([^\s#]+)', content)
+        tag = m_tag.group(1).strip() if m_tag else os.path.basename(self.app_rel_path).replace(".conf", "")
+
+        is_json = "format json" in content or "@type json" in content or "detect_json true" in content
+
+        return {
+            "source_type": source_type,
+            "log_path": log_path,
+            "pos_file": pos_file,
+            "pos_filename": os.path.basename(pos_file) if pos_file else None,
+            "tag": tag,
+            "is_json": is_json,
+            "content": content
+        }
+
+    def discover_target_environment(self):
+        if self.local_mode or not self.remote_vm:
+            return self.discovered
+
+        # 1. Discover OSS Service Name
+        check_svc_cmd = "systemctl list-unit-files 'fluent*' 'td-agent*' --no-legend 2>/dev/null || true"
+        res = run_ssh_cmd(self.remote_vm, self.project, self.zone, check_svc_cmd, check=False)
+        for line in res.stdout.splitlines():
+            if "fluentd.service" in line:
+                self.discovered["oss_service_name"] = "fluentd"
+                break
+            elif "fluent-package.service" in line:
+                self.discovered["oss_service_name"] = "fluent-package"
+                break
+            elif "td-agent.service" in line:
+                self.discovered["oss_service_name"] = "td-agent"
+                break
+
+        # 2. Discover Daemon User / Group
+        check_user_cmd = "grep -E '^(User|Group)=' /lib/systemd/system/fluent*.service /lib/systemd/system/td-agent*.service /etc/systemd/system/fluent*.service 2>/dev/null || id -un _fluentd 2>/dev/null || id -un fluent 2>/dev/null || id -un td-agent 2>/dev/null || echo 'fluent'"
+        res_user = run_ssh_cmd(self.remote_vm, self.project, self.zone, check_user_cmd, check=False)
+        for line in res_user.stdout.splitlines():
+            if "User=" in line and len(line.split("User=")[1].strip()) > 0:
+                self.discovered["daemon_user"] = line.split("User=")[1].strip()
+            elif "Group=" in line and len(line.split("Group=")[1].strip()) > 0:
+                self.discovered["daemon_group"] = line.split("Group=")[1].strip()
+            elif "_fluentd" in line:
+                self.discovered["daemon_user"] = "_fluentd"
+                self.discovered["daemon_group"] = "_fluentd"
+
+        # 3. Discover GCP Project
+        if not self.project or self.project == "unknown-project":
+            proj_cmd = "curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/project/project-id 2>/dev/null || true"
+            res_proj = run_ssh_cmd(self.remote_vm, self.project, self.zone, proj_cmd, check=False)
+            if res_proj.stdout.strip():
+                self.discovered["project_id"] = res_proj.stdout.strip()
+        else:
+            self.discovered["project_id"] = self.project
+
+        return self.discovered
+
+    def build_source_aware_canary(self, canary_id):
+        src_type = self.app_metadata["source_type"]
+        tag = self.app_metadata["tag"]
+        log_path = self.app_metadata["log_path"]
+        is_json = self.app_metadata["is_json"]
+        proj = self.discovered["project_id"]
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        if src_type == "tail" and log_path:
+            if is_json:
+                payload = json.dumps({
+                    "message": "Migration verification canary test entry",
+                    "canary_id": canary_id,
+                    "migration_stage": "Stage 5 Controlled Cutover",
+                    "timestamp": timestamp
+                })
+                inject_cmd = f"echo '{payload}' >> {log_path}"
+            else:
+                payload = f"[{timestamp}] [CANARY] Migration verification test entry canary_id={canary_id}"
+                inject_cmd = f"echo '{payload}' >> {log_path}"
+
+        elif src_type == "http":
+            payload = json.dumps({
+                "message": "Migration verification HTTP canary test entry",
+                "canary_id": canary_id,
+                "timestamp": timestamp
+            })
+            inject_cmd = f"curl -X POST -H 'Content-Type: application/json' -d '{payload}' http://127.0.0.1:9880/{tag}"
+
+        elif src_type == "syslog":
+            inject_cmd = f"logger -t {tag} -p user.info 'canary_id={canary_id} Migration verification test entry'"
+
+        else:
+            inject_cmd = f"# Generic canary injection for source type {src_type}"
+
+        query_cmd = f"gcloud logging read 'logName=\"projects/{proj}/logs/{tag}\" AND (textPayload=~\"{canary_id}\" OR jsonPayload.canary_id=\"{canary_id}\")' --project={proj} --limit=1 --format=json"
+
+        return {
+            "canary_id": canary_id,
+            "inject_cmd": inject_cmd,
+            "query_cmd": query_cmd,
+            "expected_log_name": f"projects/{proj}/logs/{tag}"
+        }
+
+    def generate_execution_plan(self):
+        canary_id = f"CANARY_MIG_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        canary_info = self.build_source_aware_canary(canary_id)
+
+        app_basename = os.path.basename(self.app_rel_path)
+        legacy_conf_path = f"{self.discovered['legacy_config_dir']}/config.d/{app_basename}"
+        disabled_conf_path = f"{legacy_conf_path}.disabled"
+
+        legacy_pos_path = f"{self.discovered['legacy_pos_dir']}/{self.app_metadata['pos_filename']}" if self.app_metadata['pos_filename'] else None
+        target_pos_path = f"{self.discovered['oss_pos_dir']}/{self.app_metadata['pos_filename']}" if self.app_metadata['pos_filename'] else None
+
+        target_app_conf = f"{self.discovered['oss_config_dir']}/config.d/{app_basename}"
+        target_master_conf = f"{self.discovered['oss_config_dir']}/fluentd.conf"
+
+        plan = {
+            "target_application": app_basename,
+            "source_type": self.app_metadata["source_type"],
+            "target_tag": self.app_metadata["tag"],
+            "discovered_environment": self.discovered,
+            "canary_info": canary_info,
+            "steps": [
+                {
+                    "step": 1,
+                    "title": "Create Rollback State Snapshot",
+                    "action": f"Backup {self.discovered['legacy_config_dir']} and active position files into timestamped /var/backups/ directory."
+                },
+                {
+                    "step": 2,
+                    "title": "Deactivate Application in Legacy Agent (Zero Duplicate Ingestion)",
+                    "action": f"mv {legacy_conf_path} {disabled_conf_path} && systemctl reload {self.discovered['legacy_service_name']}"
+                },
+                {
+                    "step": 3,
+                    "title": "Verify Stationary Offset & Transfer Position State",
+                    "action": f"Verify {legacy_pos_path} has stopped advancing (no writes across 1s window) -> cp -p {legacy_pos_path} {target_pos_path} && chown {self.discovered['daemon_user']}:{self.discovered['daemon_group']} {target_pos_path}" if legacy_pos_path else "N/A (No position file required for this source type)"
+                },
+                {
+                    "step": 4,
+                    "title": "Deploy Conflict-Free Scoped OSS Configuration",
+                    "action": f"Deploy scoped master config to {target_master_conf} (with shared Prometheus/HTTP port listeners disabled) and application config to {target_app_conf}"
+                },
+                {
+                    "step": 5,
+                    "title": "Start & Validate OSS Fluentd Service",
+                    "action": f"systemctl enable {self.discovered['oss_service_name']} && systemctl restart {self.discovered['oss_service_name']}"
+                },
+                {
+                    "step": 6,
+                    "title": "Source-Aware Canary Ingestion & Delivery Verification",
+                    "action": f"Inject canary entry via: {canary_info['inject_cmd']}\nVerify delivery via: {canary_info['query_cmd']}"
+                }
+            ]
+        }
+
+        return plan
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: stage5_migration_engine.py <config_dir> <app_rel_path> [--remote-vm <vm> --project <proj> --zone <zone>]", file=sys.stderr)
+        sys.exit(1)
+
+    config_dir = sys.argv[1]
+    app_rel_path = sys.argv[2]
+
+    remote_vm = None
+    project = None
+    zone = None
+
+    i = 3
+    while i < len(sys.argv):
+        if sys.argv[i] == "--remote-vm" and i + 1 < len(sys.argv):
+            remote_vm = sys.argv[i+1]
+            i += 2
+        elif sys.argv[i] == "--project" and i + 1 < len(sys.argv):
+            project = sys.argv[i+1]
+            i += 2
+        elif sys.argv[i] == "--zone" and i + 1 < len(sys.argv):
+            zone = sys.argv[i+1]
+            i += 2
+        else:
+            i += 1
+
+    engine = Stage5MigrationEngine(config_dir, app_rel_path, remote_vm, project, zone, local_mode=(remote_vm is None))
+    engine.discover_target_environment()
+    plan = engine.generate_execution_plan()
+
+    print(json.dumps(plan, indent=2))
+
+if __name__ == '__main__':
+    main()

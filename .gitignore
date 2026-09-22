@@ -1,0 +1,36 @@
+# Generated output and reports
+*report*.md
+migration_assessment.md
+migration_execution_report.md
+config_generation_report.md
+pre_migration_validation_report.md
+compatibility_review_items.md
+migration_context.json
+generated_oss_configs/
+staged_configs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Mac
+.DS_Store
