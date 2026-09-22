@@ -70,7 +70,7 @@ echo "=== Running Pre-Migration Validation for Scope: $SCOPE_PARAM ==="
 python3 ./scripts/validate_oss_config.py "$CONFIG_DIR" "google-fluentd.conf" "$SCOPE_PARAM" "$REPORT_FILE" "${EXTRA_ARGS[@]}"
 
 # Sync with agent brain artifact directory if accessible
-BRAIN_DIR="/usr/local/google/home/ravichandrae/.gemini/jetski/brain/47003932-a0d8-4f4b-af6d-32d5d4847ab1"
+BRAIN_DIR="${AGENT_WORKSPACE_DIR:-/tmp/agent_artifacts}"
 if [ -d "$BRAIN_DIR" ]; then
     cp "$REPORT_FILE" "$BRAIN_DIR/$REPORT_FILE" 2>/dev/null || true
 fi

@@ -45,7 +45,7 @@ echo "=== Transforming configurations into $OUT_DIR ==="
 python3 ./scripts/generate_oss_config.py "$STAGED_DIR" "$OUT_DIR" "google-fluentd.conf" "$TARGET_POS_DIR" "$TARGET_BUFFER_DIR" "$REPORT_FILE" "$REVIEW_FILE"
 
 # Also update agent artifact directory if accessible
-BRAIN_DIR="/usr/local/google/home/ravichandrae/.gemini/jetski/brain/47003932-a0d8-4f4b-af6d-32d5d4847ab1"
+BRAIN_DIR="${AGENT_WORKSPACE_DIR:-/tmp/agent_artifacts}"
 if [ -d "$BRAIN_DIR" ]; then
     cp "$REPORT_FILE" "$BRAIN_DIR/$REPORT_FILE" 2>/dev/null || true
     cp "$REVIEW_FILE" "$BRAIN_DIR/$REVIEW_FILE" 2>/dev/null || true

@@ -173,7 +173,7 @@ class MigrationOrchestrator:
         self.context.set_artifact("pre_migration_validation_report", val_report)
         
         # Default validation scope is first active application
-        default_scope = discovered_apps[0]["rel_path"] if discovered_apps else "config.d/ravi-detect-json-baseline.conf"
+        default_scope = discovered_apps[0]["rel_path"] if discovered_apps else "config.d/sample-detect-json-baseline.conf"
         val_cmd = [
             sys.executable, os.path.join(self.scripts_dir, "validate_oss_config.py"),
             gen_dir, "google-fluentd.conf", default_scope, val_report
@@ -399,7 +399,7 @@ def main():
     parser.add_argument("--zone", help="Target GCP Zone")
     parser.add_argument("--context", default=DEFAULT_CONTEXT_FILE, help="Path to migration context JSON file")
     parser.add_argument("--action", choices=["auto-pipeline", "approve-scope", "execute-cutover", "interactive", "status"], default="status", help="Orchestration action to perform")
-    parser.add_argument("--app", help="Application config relative path to migrate (e.g. config.d/ravi-detect-json-baseline.conf)")
+    parser.add_argument("--app", help="Application config relative path to migrate (e.g. config.d/sample-detect-json-baseline.conf)")
     parser.add_argument("--local-mode", action="store_true", help="Run in local mock mode without remote SSH execution")
 
     args = parser.parse_args()
