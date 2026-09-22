@@ -2,10 +2,6 @@
 
 An agentic skill to automate discovery, configuration generation, and validation for migrating workloads from Google Fluentd (`v0.12`) to OSS Fluentd (`v1`).
 
-## Contributors & Component Ownership
-- **End-to-End VM Orchestration, Discovery & Controlled Cutover Pipeline:** Ravi Chandra Eluri
-- **v0.12-to-v1 Syntax Modernization Engine, Breaking-Change Rules & 3P App Test Suite (25 Scenarios):** Kiran Kumar Reddy Kanchani
-
 ---
 
 ## Scope
@@ -38,30 +34,6 @@ The agent will automatically read the `SKILL.md` file, understand the architectu
 
 ---
 
-## Quick Start: Local Testing & 3P App Config Translation (No VM Needed)
-
-### 1. Run the One-Command Interactive Demo & 25-Scenario Verification Suite
-Run `./run_demo.sh` (or `python3 tests/test_migration_suite.py`) to see a live **Before (`v0.12`) vs. After (`v1`)** config translation and execute all **25 third-party application migration scenarios** (Nginx, Apache, Syslog, Java HTTP/Forward, RabbitMQ, Redis, MongoDB, PostgreSQL, MySQL, Kafka, Tomcat, Elasticsearch, ZooKeeper, HAProxy, Kubernetes Metadata, Puppet, Memcached, Joomla CMS, GitLab, Magento, Redmine, SaltStack, and Prometheus-to-OpenCensus):
-```bash
-./run_demo.sh
-```
-
-### 2. Translate Any Individual Legacy `.conf` File (`sample_legacy_configs/`)
-```bash
-python3 scripts/migrate_legacy_to_modern.py \
-    sample_legacy_configs/legacy_paulina_doc_example.conf \
-    /tmp/modern_output.conf
-```
-
-### 3. Stage-by-Stage Local Test Wrappers
-Use the test wrappers to validate the pipeline logic against local dummy configs safely without touching any VMs:
-- Discovery: `./scripts/test_local_discovery.sh`
-- Config Generation: `./scripts/test_config_generation.sh`
-- Validation: `./scripts/test_pre_migration_validation.sh`
-- Migration: `./scripts/test_controlled_migration.sh`
-
----
-
 ## Manual VM Execution
 
 **1. VM Discovery (Stage 1):**
@@ -82,7 +54,31 @@ Execute approval-gated cutover for an approved application.
 
 ---
 
-## Stage 3 Syntax Modernization & Breaking-Change Rules Encoded (`v0.12` -> `v1`)
+## Local Testing & 3P App Config Translation (No VM Needed)
+
+### 1. Run the One-Command Interactive Demo & 25-Scenario Verification Suite
+Run `./run_demo.sh` (or `python3 tests/test_migration_suite.py`) to see a live **Before (`v0.12`) vs. After (`v1`)** config translation and execute all **25 third-party application migration scenarios** (Nginx, Apache, Syslog, Java HTTP/Forward, RabbitMQ, Redis, MongoDB, PostgreSQL, MySQL, Kafka, Tomcat, Elasticsearch, ZooKeeper, HAProxy, Kubernetes Metadata, Puppet, Memcached, Joomla CMS, GitLab, Magento, Redmine, SaltStack, and Prometheus-to-OpenCensus):
+```bash
+./run_demo.sh
+```
+
+### 2. Translate Any Individual Legacy `.conf` File (`sample_legacy_configs/`)
+```bash
+python3 scripts/migrate_legacy_to_modern.py \
+    sample_legacy_configs/legacy_doc_example.conf \
+    /tmp/modern_output.conf
+```
+
+### 3. Stage-by-Stage Local Test Wrappers
+Use the test wrappers to validate the pipeline logic against local dummy configs safely without touching any VMs:
+- Discovery: `./scripts/test_local_discovery.sh`
+- Config Generation: `./scripts/test_config_generation.sh`
+- Validation: `./scripts/test_pre_migration_validation.sh`
+- Migration: `./scripts/test_controlled_migration.sh`
+
+---
+
+## Syntax Modernization & Breaking-Change Rules Encoded (`v0.12` -> `v1`)
 
 | # | Discrepancy / Breaking Change (`google-fluentd` vs OSS `fluentd` v1) | Legacy `google-fluentd` (`v0.12`) | Modern OSS `fluentd` (`v1` Fix Applied by Skill) |
 | :- | :--- | :--- | :--- |

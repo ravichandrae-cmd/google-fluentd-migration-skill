@@ -19,7 +19,7 @@ if gcloud compute ssh "$PERMITTED_VM" --project="$GCP_PROJECT" --zone="$GCP_ZONE
     python3 ./scripts/generate_report.py "$PERMITTED_VM" "$GCP_PROJECT" "$GCP_ZONE" "$TMP_OUT" "migration_assessment.md"
     
     # Also update agent artifact directory if accessible
-    BRAIN_DIR="/usr/local/google/home/ravichandrae/.gemini/jetski/brain/47003932-a0d8-4f4b-af6d-32d5d4847ab1"
+    BRAIN_DIR="${AGENT_WORKSPACE_DIR:-/tmp/agent_artifacts}"
     if [ -d "$BRAIN_DIR" ]; then
         cp migration_assessment.md "$BRAIN_DIR/migration_assessment.md" 2>/dev/null || true
     fi

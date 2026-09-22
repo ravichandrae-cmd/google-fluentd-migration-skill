@@ -31,18 +31,18 @@ cat << 'EOF' > "$TEST_DIR/google-fluentd.conf"
 </match>
 EOF
 
-cat << 'EOF' > "$TEST_DIR/config.d/ravi-detect-json-baseline.conf"
+cat << 'EOF' > "$TEST_DIR/config.d/sample-detect-json-baseline.conf"
 <source>
   @type tail
   <parse>
     @type none
   </parse>
-  path /var/log/ravi-detect-json-baseline.log
-  pos_file /var/lib/fluentd/pos/ravi-detect-json-baseline.pos
-  tag ravi.detect_json.baseline
+  path /var/log/sample-detect-json-baseline.log
+  pos_file /var/lib/fluentd/pos/sample-detect-json-baseline.pos
+  tag sample.detect_json.baseline
 </source>
 
-<match ravi.detect_json.baseline>
+<match sample.detect_json.baseline>
   @type google_cloud
   detect_json true
 </match>
@@ -83,9 +83,9 @@ fi
 echo "PASS: Scoped master config successfully generated known-good minimal pattern with single include path."
 
 echo "--- Test 2: Execution Plan Generation (Tail Source) ---"
-PLAN_OUT=$(python3 "$SCRIPT_DIR/stage5_migration_engine.py" "$TEST_DIR" "config.d/ravi-detect-json-baseline.conf")
+PLAN_OUT=$(python3 "$SCRIPT_DIR/stage5_migration_engine.py" "$TEST_DIR" "config.d/sample-detect-json-baseline.conf")
 
-if ! echo "$PLAN_OUT" | grep -q "ravi.detect_json.baseline"; then
+if ! echo "$PLAN_OUT" | grep -q "sample.detect_json.baseline"; then
     echo "FAIL: Target tag missing in generated plan."
     exit 1
 fi
@@ -117,7 +117,7 @@ echo "PASS: Source-aware canary generator correctly selected HTTP curl injection
 
 echo "--- Test 4: Execution Cutover Flow & Report Generation ---"
 REPORT_TEST="$TEST_DIR/test_migration_report.md"
-python3 "$SCRIPT_DIR/stage5_migration_engine.py" "$TEST_DIR" "config.d/ravi-detect-json-baseline.conf" \
+python3 "$SCRIPT_DIR/stage5_migration_engine.py" "$TEST_DIR" "config.d/sample-detect-json-baseline.conf" \
     --execute \
     --scoped-master "$TEST_DIR/scoped_master.conf" \
     --report "$REPORT_TEST"
