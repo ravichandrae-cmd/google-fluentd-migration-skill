@@ -1,6 +1,6 @@
 ---
 name: google-fluentd-migration-skill
-description: Agent skill that orchestrates the end-to-end migration lifecycle from google-fluentd to OSS Fluentd with shared context persistence and two approval gates.
+description: Agent skill that orchestrates the end-to-end migration lifecycle from google-fluentd to OSS Fluentd with shared context persistence, two approval gates, and deep v1 syntax modernization.
 ---
 # Google Fluentd to OSS Fluentd Migration Skill
 
@@ -136,7 +136,7 @@ All stage results, discovered paths, daemon user/group, application catalog, and
 
 ## Orchestrator Operations & CLI Interface
 
-The migration orchestrator provides a unified entry point [`scripts/orchestrate_migration.py`](file:///usr/local/google/home/ravichandrae/Desktop/python/google-fluentd-migration-skill/scripts/orchestrate_migration.py):
+The migration orchestrator provides a unified entry point `scripts/orchestrate_migration.py`:
 
 ### 1. Run Phase 1 Automated Pipeline (Stages 1 – 4)
 Executes discovery, assessment, v1 config generation, and pre-migration validation, then halts at Gate 1:
@@ -167,6 +167,55 @@ python3 ./scripts/orchestrate_migration.py \
 ```bash
 python3 ./scripts/orchestrate_migration.py --action status
 ```
+
+---
+
+## Stage 3 Deep Syntax Modernization Rules (CRITICAL)
+
+When the orchestrator (`scripts/generate_oss_config.py`) converts legacy v0.12 configurations to upstream v1 in Stage 3, it **MUST strictly apply the following 10 syntax translation rules** to prevent silent data loss and fatal daemon startup crashes:
+
+### Rule A: Do Not Mix v0.12 and v1 Syntax
+Never mix flat v0.12 parameters with nested v1 directives within the same plugin block. Keep `@type google_cloud` at the top of `<match>` before `<buffer>`.
+
+### Rule B: Output Plugin `<buffer>` Migration
+Flat buffer parameters inside `<match>` MUST be moved into a nested `<buffer>` directive:
+- `buffer_type file` -> `@type file`
+- `buffer_path <path>` -> `path <path>`
+- `buffer_chunk_limit <size>` -> `chunk_limit_size <size>`
+- `flush_interval <sec>` -> `flush_interval <sec>` (inside `<buffer>`)
+- `retry_limit <count>` -> `retry_max_times <count>`
+- `disable_retry_limit true/false` -> `retry_forever true/false`
+- `retry_wait <sec>` -> `retry_wait <sec>` (inside `<buffer>`)
+- `max_retry_wait <sec>` -> `retry_max_interval <sec>`
+- `num_threads <count>` -> `flush_thread_count <count>`
+- `partial_success` -> **REMOVE** (permanently enabled in v1)
+
+### Rule C: Input Plugin `<parse>` & Inline Regex Migration
+- Flat `format <type>` parameters (`json`, `multiline`, `syslog`, along with `format_firstline`, `format1..N`, `time_format`, `time_key`) MUST be moved into a nested `<parse>` block with `@type <type>`.
+- Inline regex formats (`format /<regex>/`) MUST be converted to `<parse>` with `@type regexp` and `expression /<regex>/`.
+- Remove `auto_typecast` if used inside a parser plugin (unsupported in v1; causes fatal startup `ConfigError`).
+
+### Rule D: Ruby Time Object Serialization Fix
+Raw Ruby `Time` objects used inside `<record>` filters (e.g., `raw_timestamp ${time}`) cause fatal v1 msgpack serialization crashes. Explicitly cast them: `raw_timestamp ${time.to_i}`.
+
+### Rule E: Modern RabbitMQ Erlang Multiline Format
+Upgrade legacy RabbitMQ regex parsers to millisecond precision (`%Y-%m-%d %H:%M:%S.%L`) and Erlang PID capture (`<(?<pid>[^>]+)>`).
+
+### Rule F: gRPC Transport & Compression
+Add `use_grpc true` and `grpc_compression_algorithm gzip` under `<match **>` output blocks for optimal ingestion throughput into Cloud Logging.
+
+### Rule G: Regex Comment Escaping
+In v1, `#` is strictly an inline comment delimiter. Legacy regex like `format1 /^... #(?<pid>\d+) .../` will silently truncate and crash. You MUST escape it: `format1 /^... \#(?<pid>\d+) .../`.
+
+### Rule H: Syslog Port 514 Privilege Separation
+Remap privileged `port 514` to unprivileged `port 5140` for non-root `_fluentd` daemon execution.
+
+### Rule I: Position (`.pos`) File Takeover & Offset Continuity
+Preserve `.pos` offset state from `/var/lib/google-fluentd/pos/` to `/var/lib/fluentd/pos/` (with `_fluentd` ownership) so historical logs are not double-ingested and active lines are not dropped.
+
+### Rule J: Prometheus Monitoring Crash (`monitoring_type prometheus` -> `opencensus`) & Edge Case Isolation
+- Switch `monitoring_type prometheus` to `monitoring_type opencensus` to avoid fatal `prometheus-client >= 0.10.0` `ArgumentError` crashes.
+- Safely comment out proprietary Google filters (`analyze_config`, `add_insert_ids`) and unmapped directives inline, and prepend a `# WARNING [MIGRATION EDGE CASE]` header block for developer review.
 
 ---
 

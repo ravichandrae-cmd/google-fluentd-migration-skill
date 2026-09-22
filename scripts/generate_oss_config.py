@@ -250,41 +250,179 @@ def transform_file_content(lines, rel_path, target_pos_dir, target_buffer_dir):
         elif block.plugin_type == "kubernetes_metadata_filter":
             required_plugins.add("fluent-plugin-kubernetes_metadata_filter")
 
-        # Line-by-line processing inside supported block
-        for idx_in_block, bline in enumerate(block.lines):
-            bstripped = bline.strip()
-            curr_line_num = block.start_line_num + idx_in_block
+        # Line-by-line & block-level v0.12 -> v1 syntax modernization inside supported block
+        block_text = "".join(block.lines)
+        orig_block_text = block_text
 
-            # Remap pos_file
+        # 1. Strip auto_typecast (Rule C)
+        if re.search(r'^\s*auto_typecast\s+(true|false)', block_text, re.MULTILINE):
+            block_text = re.sub(
+                r'^\s*auto_typecast\s+(true|false).*$',
+                '    # NOTE: auto_typecast directive stripped (unsupported in v1 parser)',
+                block_text,
+                flags=re.MULTILINE,
+            )
+            syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "auto_typecast true/false", "new": "Removed (unsupported in v1)"})
+
+        # 2. Strip partial_success (Rule B)
+        if re.search(r'^\s*partial_success\s+', block_text, re.MULTILINE):
+            block_text = re.sub(
+                r'^\s*partial_success\s+.*$',
+                '  # NOTE: partial_success directive stripped (permanently enabled in v1)',
+                block_text,
+                flags=re.MULTILINE,
+            )
+            syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "partial_success", "new": "Removed (default in v1)"})
+
+        # 3. Ruby Time Object Explicit Casting (${time} -> ${time.to_i}) (Rule D)
+        if 'enable_ruby true' in block_text and '${time}' in block_text:
+            block_text = block_text.replace('${time}', '${time.to_i}')
+            syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "${time}", "new": "${time.to_i}"})
+
+        # 4. Modern RabbitMQ Log Ingestion Regex (Rule E)
+        if 'tag rabbitmq' in block_text or 'rabbitmq' in rel_path.lower():
+            if 'format_firstline' in block_text:
+                block_text = re.sub(
+                    r'format_firstline /.+/',
+                    r'format_firstline /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}/',
+                    block_text,
+                )
+                block_text = re.sub(
+                    r'format1 /.+/',
+                    r'format1 /^(?<time>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}) \\[(?<severity>[^\\]]+)\\] <(?<pid>[^>]+)> (?m:(?<message>.*))$/',
+                    block_text,
+                )
+                block_text = re.sub(r'time_format .+', r'time_format %Y-%m-%d %H:%M:%S.%L', block_text)
+                syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "Legacy RabbitMQ regex", "new": "Modern millisecond + Erlang PID regex"})
+
+        # 5. Escape unescaped '#' in Regex patterns (Rule G)
+        escaped_lines = []
+        for l_str in block_text.splitlines(keepends=True):
+            m_rx = re.match(r'^(\s*(?:format\d*|format_firstline|expression)\s+/)(.*)(/\s*\r?\n?)$', l_str)
+            if m_rx:
+                pfx, bdy, sfx = m_rx.groups()
+                new_bdy, cnt = re.subn(r'(?<!\\)#', r'\\#', bdy)
+                if cnt > 0:
+                    l_str = pfx + new_bdy + sfx
+                    syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "Unescaped # in regex", "new": "Escaped \\#"})
+            escaped_lines.append(l_str)
+        block_text = "".join(escaped_lines)
+
+        # 6. Shift Syslog port 514 -> 5140 (Rule H)
+        if block.tag_name == "source" and 'port 514' in block_text and 'port 5140' not in block_text:
+            block_text = re.sub(r'port 514(?!\d)', r'port 5140 # NOTE: Shifted to unprivileged port 5140', block_text)
+            syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "port 514", "new": "port 5140"})
+
+        # 7. Switch monitoring_type prometheus -> opencensus (Rule J)
+        if re.search(r'^\s*monitoring_type\s+prometheus\b', block_text, re.MULTILINE):
+            block_text = re.sub(
+                r'^(\s*)monitoring_type\s+prometheus\b.*$',
+                r'\1monitoring_type opencensus # NOTE: Switched from prometheus to opencensus',
+                block_text,
+                flags=re.MULTILINE,
+            )
+            syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "monitoring_type prometheus", "new": "monitoring_type opencensus"})
+
+        # 8. Remap pos_file & buffer_path and upgrade <source> flat format -> <parse> (Rule C) and <match> flat buffer -> <buffer> (Rule B)
+        updated_block_lines = block_text.splitlines(keepends=True)
+        processed_lines = []
+        parse_sub_lines = []
+        has_flat_format = False
+        parse_keys = ('format_firstline', 'time_format', 'time_key', 'keep_time_key')
+
+        for bline in updated_block_lines:
+            bstripped = bline.strip()
             if bstripped.startswith("pos_file "):
                 old_pos = bstripped.split("pos_file ", 1)[1].strip()
                 filename = os.path.basename(old_pos)
                 new_pos = os.path.join(target_pos_dir, filename)
                 path_remaps.append({"type": "pos_file", "old": old_pos, "new": new_pos, "file": rel_path})
                 indent = bline[:len(bline) - len(bline.lstrip())]
-                new_lines.append(f"{indent}pos_file {new_pos}\n")
+                processed_lines.append(f"{indent}pos_file {new_pos}\n")
                 continue
 
-            # Remap buffer_path
             if bstripped.startswith("buffer_path "):
                 old_buf = bstripped.split("buffer_path ", 1)[1].strip()
                 new_buf = target_buffer_dir
                 path_remaps.append({"type": "buffer_path", "old": old_buf, "new": new_buf, "file": rel_path})
                 indent = bline[:len(bline) - len(bline.lstrip())]
-                new_lines.append(f"{indent}buffer_path {new_buf}\n")
+                processed_lines.append(f"{indent}buffer_path {new_buf}\n")
                 continue
 
-            # Upgrade legacy format syntax inside <source>
-            if block.tag_name == "source" and bstripped.startswith("format "):
-                fmt_val = bstripped.split("format ", 1)[1].strip()
-                syntax_upgrades.append({"file": rel_path, "line": curr_line_num, "old": bstripped, "new": f"<parse> @type {fmt_val} </parse>"})
-                indent = bline[:len(bline) - len(bline.lstrip())]
-                new_lines.append(f"{indent}<parse>\n")
-                new_lines.append(f"{indent}  @type {fmt_val}\n")
-                new_lines.append(f"{indent}</parse>\n")
-                continue
+            if block.tag_name == "source" and '<parse>' not in block_text:
+                m_fmt = re.match(r'^(\s*)format\s+(.+)$', bline)
+                if m_fmt:
+                    fmt_val = m_fmt.group(2).strip()
+                    has_flat_format = True
+                    if fmt_val.startswith('/') and fmt_val.endswith('/'):
+                        parse_sub_lines.append("    @type regexp\n")
+                        parse_sub_lines.append(f"    expression {fmt_val}\n")
+                        syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": bstripped, "new": "<parse> @type regexp + expression </parse>"})
+                    else:
+                        parse_sub_lines.append(f"    @type {fmt_val}\n")
+                        syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": bstripped, "new": f"<parse> @type {fmt_val} </parse>"})
+                    continue
+                if re.match(r'^\s*(format\d+|' + '|'.join(parse_keys) + r')\s+', bline) and (
+                    has_flat_format or re.search(r'^\s*format\s+', block_text, re.MULTILINE)
+                ):
+                    has_flat_format = True
+                    parse_sub_lines.append(f"    {bstripped}\n")
+                    continue
 
-            new_lines.append(bline)
+            processed_lines.append(bline)
+
+        if has_flat_format and parse_sub_lines:
+            final_src_lines = []
+            for pline in processed_lines:
+                if pline.strip() == '</source>':
+                    final_src_lines.append("  <parse>\n")
+                    final_src_lines.extend(parse_sub_lines)
+                    final_src_lines.append("  </parse>\n")
+                final_src_lines.append(pline)
+            processed_lines = final_src_lines
+
+        # 9. Inside <match>, convert flat buffer options into nested <buffer> & add gRPC flags (Rules B & F)
+        block_after_src = "".join(processed_lines)
+        if block.tag_name == "match" and '<buffer>' not in block_after_src:
+            buffer_params = {
+                'buffer_type': '@type',
+                'buffer_path': 'path',
+                'buffer_chunk_limit': 'chunk_limit_size',
+                'flush_interval': 'flush_interval',
+                'disable_retry_limit': 'retry_forever',
+                'retry_limit': 'retry_max_times',
+                'retry_wait': 'retry_wait',
+                'max_retry_wait': 'retry_max_interval',
+                'num_threads': 'flush_thread_count',
+            }
+            buf_lines = []
+            for mline in block_after_src.splitlines():
+                for old_p, new_p in buffer_params.items():
+                    if re.search(r'^\s*' + old_p + r'\s+', mline):
+                        val = re.sub(r'^\s*' + old_p + r'\s+', '', mline).strip()
+                        buf_lines.append(f"    {new_p} {val}")
+                        break
+            if buf_lines:
+                for old_p in buffer_params.keys():
+                    block_after_src = re.sub(r'^\s*' + old_p + r'\s+.*$\n?', '', block_after_src, flags=re.MULTILINE)
+                buffer_block = "  <buffer>\n" + "\n".join(buf_lines) + "\n  </buffer>"
+                if re.search(r'(<match[^>]*>\s*\n\s*@type\s+\S+)', block_after_src):
+                    block_after_src = re.sub(r'(<match[^>]*>\s*\n\s*@type\s+\S+)', r'\1\n' + buffer_block, block_after_src)
+                else:
+                    block_after_src = re.sub(r'(<match[^>]*>)', r'\1\n' + buffer_block, block_after_src)
+                syntax_upgrades.append({"file": rel_path, "line": block.start_line_num, "old": "Flat v0.12 buffer params", "new": "Nested <buffer> block"})
+
+        if block.tag_name == "match" and block.plugin_type == "google_cloud" and 'use_grpc' not in block_after_src:
+            if re.search(r'(<match[^>]*>\s*\n\s*@type\s+\S+)', block_after_src):
+                block_after_src = re.sub(
+                    r'(<match[^>]*>\s*\n\s*@type\s+\S+)',
+                    r'\1\n  use_grpc true\n  grpc_compression_algorithm gzip',
+                    block_after_src,
+                )
+            else:
+                block_after_src = re.sub(r'(<match[^>]*>)', r'\1\n  use_grpc true\n  grpc_compression_algorithm gzip', block_after_src)
+
+        new_lines.extend(block_after_src.splitlines(keepends=True))
 
     if has_compatibility_items:
         banner = "# STATUS: [NOT MIGRATION-READY] - Contains commented proprietary/unknown directives requiring review.\n"
